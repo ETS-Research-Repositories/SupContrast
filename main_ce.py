@@ -63,6 +63,7 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
+    parser.add_argument("--save_dir", type=str, default=None)
 
     opt = parser.parse_args()
 
@@ -104,6 +105,12 @@ def parse_option():
     opt.save_folder = os.path.join(opt.model_path, opt.model_name)
     if not os.path.isdir(opt.save_folder):
         os.makedirs(opt.save_folder)
+
+    if opt.save_dir:
+        opt.save_folder = opt.save_dir
+        opt.tb_folder = opt.save_dir
+        if not os.path.exists(opt.save_folder):
+            os.makedirs(opt.save_folder)
 
     if opt.dataset == 'cifar10':
         opt.n_cls = 10

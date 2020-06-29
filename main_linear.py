@@ -60,6 +60,7 @@ def parse_option():
 
     parser.add_argument('--ckpt', type=str, default='',
                         help='path to pre-trained model')
+    parser.add_argument("--cluster_num", type=int, default=25)
 
     opt = parser.parse_args()
 
@@ -101,7 +102,7 @@ def parse_option():
 
 
 def set_model(opt):
-    model = SupConResNet(name=opt.model)
+    model = SupConResNet(name=opt.model, cluster_num=opt.cluster_num)
     criterion = torch.nn.CrossEntropyLoss()
 
     classifier = LinearClassifier(name=opt.model, num_classes=opt.n_cls)
@@ -123,7 +124,7 @@ def set_model(opt):
         criterion = criterion.cuda()
         cudnn.benchmark = True
 
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
 
     return model, classifier, criterion
 

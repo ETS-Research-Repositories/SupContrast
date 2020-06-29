@@ -1,21 +1,22 @@
 from __future__ import print_function
 
+import argparse
+import math
 import os
 import sys
-import argparse
 import time
-import math
 
 import tensorboard_logger as tb_logger
 import torch
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 
+from losses import SupConLoss
+from networks.resnet_big import SupConResNet
 from util import TwoCropTransform, AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model
-from networks.resnet_big import SupConResNet
-from losses import SupConLoss
+from clustering_loss import IIDLoss
 
 try:
     import apex
@@ -33,7 +34,7 @@ def parse_option():
                         help='save frequency')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=16,
+    parser.add_argument('--num_workers', type=int, default=24,
                         help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=1000,
                         help='number of training epochs')
@@ -58,6 +59,9 @@ def parse_option():
     # method
     parser.add_argument('--method', type=str, default='SupCon',
                         choices=['SupCon', 'SimCLR'], help='choose method')
+    parser.add_argument('--train_cluster', action="store_true", help="using cluster prior")
+    parser.add_argument("--cluster_num", type=int, default=25)
+    parser.add_argument("--cluster_regweigt", type=float, default=1, help="clustering reg_weight")
 
     # temperature
     parser.add_argument('--temp', type=float, default=0.07,
@@ -72,6 +76,7 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
+    parser.add_argument("--save_dir", default=None)
 
     opt = parser.parse_args()
 
@@ -85,9 +90,9 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
-    opt.model_name = '{}_{}_{}_lr_{}_decay_{}_bsz_{}_temp_{}_trial_{}'.\
+    opt.model_name = '{}_{}_{}_lr_{}_decay_{}_bsz_{}_temp_{}_trial_{}_{}'. \
         format(opt.method, opt.dataset, opt.model, opt.learning_rate,
-               opt.weight_decay, opt.batch_size, opt.temp, opt.trial)
+               opt.weight_decay, opt.batch_size, opt.temp, opt.trial, "use_cluster_reg_{}".format(opt.cluster_regweigt) if opt.train_cluster else "")
 
     if opt.cosine:
         opt.model_name = '{}_cosine'.format(opt.model_name)
@@ -102,18 +107,24 @@ def parse_option():
         if opt.cosine:
             eta_min = opt.learning_rate * (opt.lr_decay_rate ** 3)
             opt.warmup_to = eta_min + (opt.learning_rate - eta_min) * (
-                    1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
+                1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
         else:
             opt.warmup_to = opt.learning_rate
 
-    opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
-    if not os.path.isdir(opt.tb_folder):
-        os.makedirs(opt.tb_folder)
+    if not opt.save_dir:
 
-    opt.save_folder = os.path.join(opt.model_path, opt.model_name)
-    if not os.path.isdir(opt.save_folder):
-        os.makedirs(opt.save_folder)
+        opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
+        if not os.path.isdir(opt.tb_folder):
+            os.makedirs(opt.tb_folder)
 
+        opt.save_folder = os.path.join(opt.model_path, opt.model_name)
+        if not os.path.isdir(opt.save_folder):
+            os.makedirs(opt.save_folder)
+    else:
+        if not os.path.exists(opt.save_dir):
+            os.makedirs(opt.save_dir)
+        opt.tb_folder = opt.save_dir
+        opt.save_folder = opt.save_dir
     return opt
 
 
@@ -150,17 +161,17 @@ def set_loader(opt):
                                           download=True)
     else:
         raise ValueError(opt.dataset)
-
-    train_sampler = None
+    from util import InfiniteSampler
+    train_sampler = InfiniteSampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
         num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
 
-    return train_loader
+    return iter(train_loader)
 
 
 def set_model(opt):
-    model = SupConResNet(name=opt.model)
+    model = SupConResNet(name=opt.model, cluster_num=opt.cluster_num)
     criterion = SupConLoss(temperature=opt.temp)
 
     # enable synchronized Batch Normalization
@@ -184,21 +195,24 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    mi_meters = AverageMeter()
 
     end = time.time()
-    for idx, (images, labels) in enumerate(train_loader):
+    batch_num = len(train_loader)
+    iid_criterion = IIDLoss(lamb=1)
+
+    for idx, (images, labels) in zip(range(batch_num), train_loader):
         data_time.update(time.time() - end)
 
         images = torch.cat([images[0], images[1]], dim=0)
-        images = images.cuda(non_blocking=True)
+        # images = images.cuda(non_blocking=True)
         labels = labels.cuda(non_blocking=True)
         bsz = labels.shape[0]
 
         # warm-up learning rate
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
-
         # compute loss
-        features = model(images)
+        features, cluster_probs = model(images)
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
         if opt.method == 'SupCon':
@@ -208,9 +222,17 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
         else:
             raise ValueError('contrastive method not supported: {}'.
                              format(opt.method))
-
         # update metric
         losses.update(loss.item(), bsz)
+
+        iid_loss = torch.tensor(0, device=loss.device)
+        if opt.train_cluster:
+            cluster_pred, cluster_tf_pred=torch.split(cluster_probs, [bsz, bsz], dim=0)
+            iid_loss, p_i_j = iid_criterion(cluster_pred, cluster_tf_pred)
+            if torch.isnan(iid_loss):
+                raise RuntimeError(iid_loss)
+            loss += iid_loss * opt.cluster_regweigt
+        mi_meters.update(-iid_loss.item(), bsz)
 
         # SGD
         optimizer.zero_grad()
@@ -226,9 +248,10 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
             print('Train: [{0}][{1}/{2}]\t'
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'loss {loss.val:.3f} ({loss.avg:.3f})'.format(
-                   epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses))
+                  'loss {loss.val:.3f} ({loss.avg:.3f})\t '
+                  'mi {mi_meters.val:.3f} ({mi_meters.avg:.3f})'.format(
+                epoch, idx + 1, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses, mi_meters=mi_meters))
             sys.stdout.flush()
 
     return losses.avg

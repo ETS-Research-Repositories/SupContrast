@@ -50,12 +50,12 @@ class SupConLoss(nn.Module):
             labels = labels.contiguous().view(-1, 1)
             if labels.shape[0] != batch_size:
                 raise ValueError('Num of labels does not match num of features')
-            mask = torch.eq(labels, labels.T).float().to(device)
+            mask = torch.eq(labels, labels.t()).float().to(device)
         else:
             mask = mask.float().to(device)
 
         contrast_count = features.shape[1]
-        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
+        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0) # 32 128
         if self.contrast_mode == 'one':
             anchor_feature = features[:, 0]
             anchor_count = 1
@@ -67,7 +67,7 @@ class SupConLoss(nn.Module):
 
         # compute logits
         anchor_dot_contrast = torch.div(
-            torch.matmul(anchor_feature, contrast_feature.T),
+            torch.matmul(anchor_feature, contrast_feature.t()),
             self.temperature)
         # for numerical stability
         logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)

@@ -1,13 +1,17 @@
 from __future__ import print_function
 
 import math
+from typing import Sized, Iterator
+
 import numpy as np
 import torch
+from torch import Tensor
 import torch.optim as optim
 
 
 class TwoCropTransform:
     """Create two crops of the same image"""
+
     def __init__(self, transform):
         self.transform = transform
 
@@ -17,6 +21,7 @@ class TwoCropTransform:
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
+
     def __init__(self):
         self.reset()
 
@@ -55,7 +60,7 @@ def adjust_learning_rate(args, optimizer, epoch):
     if args.cosine:
         eta_min = lr * (args.lr_decay_rate ** 3)
         lr = eta_min + (lr - eta_min) * (
-                1 + math.cos(math.pi * epoch / args.epochs)) / 2
+            1 + math.cos(math.pi * epoch / args.epochs)) / 2
     else:
         steps = np.sum(epoch > np.asarray(args.lr_decay_epochs))
         if steps > 0:
@@ -93,3 +98,53 @@ def save_model(model, optimizer, opt, epoch, save_file):
     }
     torch.save(state, save_file)
     del state
+
+
+from torch.utils.data.sampler import Sampler
+
+
+class _InfiniteIterator(Iterator):
+
+    def __init__(self, dataset_length, shuffle=True) -> None:
+        self._dataset_length = dataset_length
+        self._shuffle = shuffle
+        self._regenerate_iter()
+
+    def __iter__(self):
+        return self.iterator
+
+    def __next__(self):
+        try:
+            idx = next(self.iterator)
+        except StopIteration:
+            self._regenerate_iter()
+            idx = next(self.iterator)
+        return idx
+
+    def _regenerate_iter(self):
+        if self._shuffle:
+            self.iterator = iter(torch.randperm(self._dataset_length).tolist())
+        else:
+            self.iterator = iter(
+                torch.arange(start=0, end=self._dataset_length).tolist()
+            )
+
+
+class InfiniteSampler(Sampler):
+    def __init__(self, data_source: Sized, shuffle=True) -> None:
+        self._dataset = data_source
+        self._shuffle = shuffle
+
+    def __iter__(self):
+        return _InfiniteIterator(self._dataset.__len__(), shuffle=self._shuffle)
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+
+
+if __name__ == '__main__':
+    dataset = [1, 2, 3, 4, 5]
+    sampler = InfiniteSampler(dataset, shuffle=False)
+    for i in sampler:
+        print(i)

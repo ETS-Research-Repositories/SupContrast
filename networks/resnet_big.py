@@ -150,6 +150,7 @@ model_dict = {
 
 class LinearBatchNorm(nn.Module):
     """Implements BatchNorm1d by BatchNorm2d, for SyncBN purpose"""
+
     def __init__(self, dim, affine=True):
         super(LinearBatchNorm, self).__init__()
         self.dim = dim
@@ -164,27 +165,35 @@ class LinearBatchNorm(nn.Module):
 
 class SupConResNet(nn.Module):
     """backbone + projection head"""
-    def __init__(self, name='resnet50', head='mlp', feat_dim=128):
+
+    def __init__(self, name='resnet50', head='mlp', feat_dim=128, cluster_num=50):
         super(SupConResNet, self).__init__()
         model_fun, dim_in = model_dict[name]
         self.encoder = model_fun()
         if head == 'linear':
-            self.head = nn.Linear(dim_in, feat_dim)
+            self.head1 = nn.Linear(dim_in, feat_dim)
+            self.head2 = nn.Sequential(nn.Linear(dim_in, cluster_num), nn.Softmax(1))
         elif head == 'mlp':
-            self.head = nn.Sequential(
+            self.head1 = nn.Sequential(
                 nn.Linear(dim_in, dim_in),
                 nn.ReLU(inplace=True),
-                nn.Linear(dim_in, feat_dim)
+                nn.Linear(dim_in, feat_dim),
+            )
+            self.head2 = nn.Sequential(
+                nn.Linear(dim_in, dim_in),
+                nn.ReLU(inplace=True),
+                nn.Linear(dim_in, cluster_num),
+                nn.Softmax(1)
             )
         else:
             raise NotImplementedError(
                 'head not supported: {}'.format(head))
 
     def forward(self, x):
-        feat = self.encoder(x)
-        feat = F.normalize(self.head(feat), dim=1)
-        return feat
-
+        feat_encode = self.encoder(x)
+        feat = F.normalize(self.head1(feat_encode), dim=1)
+        cluster_probs = self.head2(feat_encode)
+        return feat, cluster_probs
 
 class SupCEResNet(nn.Module):
     """encoder + classifier"""
@@ -200,6 +209,7 @@ class SupCEResNet(nn.Module):
 
 class LinearClassifier(nn.Module):
     """Linear classifier"""
+
     def __init__(self, name='resnet50', num_classes=10):
         super(LinearClassifier, self).__init__()
         _, feat_dim = model_dict[name]
