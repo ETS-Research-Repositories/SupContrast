@@ -58,6 +58,6 @@ submitter = JobSubmiter(project_path="./", time=20, mem=32, gres="gpu:4", on_loc
 submitter.prepare_env(
     ["source ./venv/bin/activate", "export OMP_NUM_THREADS=1 ", ]
 )
-for cmd in [*baseline, *proposed1, *proposed2]:
+for cmd in [*baseline, *proposed1]:
     submitter.account = choice(account)
     submitter.run(cmd)

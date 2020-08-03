@@ -11,12 +11,12 @@ import torch
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 
+from clustering_loss import IIDLoss
 from losses import SupConLoss
 from networks.resnet_big import SupConResNet
 from util import TwoCropTransform, AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model
-from clustering_loss import IIDLoss
 
 try:
     import apex
@@ -92,7 +92,8 @@ def parse_option():
 
     opt.model_name = '{}_{}_{}_lr_{}_decay_{}_bsz_{}_temp_{}_trial_{}_{}'. \
         format(opt.method, opt.dataset, opt.model, opt.learning_rate,
-               opt.weight_decay, opt.batch_size, opt.temp, opt.trial, "use_cluster_reg_{}".format(opt.cluster_regweigt) if opt.train_cluster else "")
+               opt.weight_decay, opt.batch_size, opt.temp, opt.trial,
+               "use_cluster_reg_{}".format(opt.cluster_regweigt) if opt.train_cluster else "")
 
     if opt.cosine:
         opt.model_name = '{}_cosine'.format(opt.model_name)
@@ -194,7 +195,7 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
-    losses = AverageMeter()
+    contrast_meter = AverageMeter()
     mi_meters = AverageMeter()
 
     end = time.time()
@@ -205,14 +206,14 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
         data_time.update(time.time() - end)
 
         images = torch.cat([images[0], images[1]], dim=0)
-        # images = images.cuda(non_blocking=True)
+        images = images.cuda(non_blocking=True)
         labels = labels.cuda(non_blocking=True)
         bsz = labels.shape[0]
 
         # warm-up learning rate
         warmup_learning_rate(opt, epoch, idx, len(train_loader), optimizer)
         # compute loss
-        features, cluster_probs = model(images)
+        features, cluster_probs_list = model(images)
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
         features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
         if opt.method == 'SupCon':
@@ -223,20 +224,22 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
             raise ValueError('contrastive method not supported: {}'.
                              format(opt.method))
         # update metric
-        losses.update(loss.item(), bsz)
+        contrast_meter.update(loss.item(), bsz)
 
-        iid_loss = torch.tensor(0, device=loss.device)
+        iid_loss = torch.tensor(0, device=loss.device, dtype=torch.float)
         if opt.train_cluster:
-            cluster_pred, cluster_tf_pred=torch.split(cluster_probs, [bsz, bsz], dim=0)
-            iid_loss, p_i_j = iid_criterion(cluster_pred, cluster_tf_pred)
-            if torch.isnan(iid_loss):
-                raise RuntimeError(iid_loss)
-            loss += iid_loss * opt.cluster_regweigt
+            for cluster_probs in cluster_probs_list:
+                cluster_pred, cluster_tf_pred = torch.split(cluster_probs, [bsz, bsz], dim=0)
+                iid_sub_loss, p_i_j = iid_criterion(cluster_pred, cluster_tf_pred)
+                iid_loss += iid_sub_loss
+        iid_loss /= len(cluster_probs_list)
         mi_meters.update(-iid_loss.item(), bsz)
+
+        total_loss = loss + opt.cluster_regweigt * iid_loss
 
         # SGD
         optimizer.zero_grad()
-        loss.backward()
+        total_loss.backward()
         optimizer.step()
 
         # measure elapsed time
@@ -251,10 +254,10 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t '
                   'mi {mi_meters.val:.3f} ({mi_meters.avg:.3f})'.format(
                 epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, mi_meters=mi_meters))
+                data_time=data_time, loss=contrast_meter, mi_meters=mi_meters))
             sys.stdout.flush()
 
-    return losses.avg
+    return contrast_meter.avg
 
 
 def main():

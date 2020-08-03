@@ -166,7 +166,7 @@ class LinearBatchNorm(nn.Module):
 class SupConResNet(nn.Module):
     """backbone + projection head"""
 
-    def __init__(self, name='resnet50', head='mlp', feat_dim=128, cluster_num=50):
+    def __init__(self, name='resnet50', head='mlp', feat_dim=128, cluster_num=10, num_subhead=10):
         super(SupConResNet, self).__init__()
         model_fun, dim_in = model_dict[name]
         self.encoder = model_fun()
@@ -179,12 +179,12 @@ class SupConResNet(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.Linear(dim_in, feat_dim),
             )
-            self.head2 = nn.Sequential(
+            self.head2 = nn.ModuleList([nn.Sequential(
                 nn.Linear(dim_in, dim_in),
                 nn.ReLU(inplace=True),
                 nn.Linear(dim_in, cluster_num),
                 nn.Softmax(1)
-            )
+            ) for _ in range(num_subhead)])
         else:
             raise NotImplementedError(
                 'head not supported: {}'.format(head))
@@ -192,7 +192,7 @@ class SupConResNet(nn.Module):
     def forward(self, x):
         feat_encode = self.encoder(x)
         feat = F.normalize(self.head1(feat_encode), dim=1)
-        cluster_probs = self.head2(feat_encode)
+        cluster_probs = [subhead(feat_encode) for subhead in self.head2]
         return feat, cluster_probs
 
 class SupCEResNet(nn.Module):
