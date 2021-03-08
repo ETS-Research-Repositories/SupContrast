@@ -5,7 +5,9 @@ tmp*.py
 __pycache__/
 *.py[cod]
 *$py.class
-
+datasets
+save
+tmp
 # C extensions
 *.so
 

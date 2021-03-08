@@ -1,21 +1,21 @@
 from __future__ import print_function
 
+import argparse
+import math
 import os
 import sys
-import argparse
 import time
-import math
 
 import tensorboard_logger as tb_logger
 import torch
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 
+from losses import SupConLoss1 as SupConLoss
+from networks.resnet_big import SupConResNet
 from util import TwoCropTransform, AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate
 from util import set_optimizer, save_model
-from networks.resnet_big import SupConResNet
-from losses import SupConLoss
 
 try:
     import apex
@@ -57,7 +57,7 @@ def parse_option():
 
     # method
     parser.add_argument('--method', type=str, default='SupCon',
-                        choices=['SupCon', 'SimCLR'], help='choose method')
+                        choices=['SupCon', "dSupCon", 'SimCLR'], help='choose method')
 
     # temperature
     parser.add_argument('--temp', type=float, default=0.07,
@@ -72,6 +72,7 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
+    parser.add_argument("--save_dir", default=None)
 
     opt = parser.parse_args()
 
@@ -85,7 +86,7 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
-    opt.model_name = '{}_{}_{}_lr_{}_decay_{}_bsz_{}_temp_{}_trial_{}'.\
+    opt.model_name = '{}_{}_{}_lr_{}_decay_{}_bsz_{}_temp_{}_trial_{}'. \
         format(opt.method, opt.dataset, opt.model, opt.learning_rate,
                opt.weight_decay, opt.batch_size, opt.temp, opt.trial)
 
@@ -102,7 +103,7 @@ def parse_option():
         if opt.cosine:
             eta_min = opt.learning_rate * (opt.lr_decay_rate ** 3)
             opt.warmup_to = eta_min + (opt.learning_rate - eta_min) * (
-                    1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
+                1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
         else:
             opt.warmup_to = opt.learning_rate
 
@@ -110,10 +111,20 @@ def parse_option():
     if not os.path.isdir(opt.tb_folder):
         os.makedirs(opt.tb_folder)
 
-    opt.save_folder = os.path.join(opt.model_path, opt.model_name)
-    if not os.path.isdir(opt.save_folder):
-        os.makedirs(opt.save_folder)
+    if not opt.save_dir:
 
+        opt.tb_folder = os.path.join(opt.tb_path, opt.model_name)
+        if not os.path.isdir(opt.tb_folder):
+            os.makedirs(opt.tb_folder)
+
+        opt.save_folder = os.path.join(opt.model_path, opt.model_name)
+        if not os.path.isdir(opt.save_folder):
+            os.makedirs(opt.save_folder)
+    else:
+        if not os.path.exists(opt.save_dir):
+            os.makedirs(opt.save_dir)
+        opt.tb_folder = opt.save_dir
+        opt.save_folder = opt.save_dir
     return opt
 
 
@@ -151,17 +162,21 @@ def set_loader(opt):
     else:
         raise ValueError(opt.dataset)
 
-    train_sampler = None
+    from util import InfiniteSampler
+    train_sampler = InfiniteSampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
         num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
 
-    return train_loader
+    return iter(train_loader)
 
 
 def set_model(opt):
     model = SupConResNet(name=opt.model)
-    criterion = SupConLoss(temperature=opt.temp)
+    if opt.method == "dSupCon":
+        criterion = SupConLoss(temperature=opt.temp, exclude_other_pos=True)
+    else:
+        criterion = SupConLoss(temperature=opt.temp, exclude_other_pos=False)
 
     # enable synchronized Batch Normalization
     if opt.syncBN:
@@ -180,13 +195,13 @@ def set_model(opt):
 def train(train_loader, model, criterion, optimizer, epoch, opt):
     """one epoch training"""
     model.train()
-
+    batch_num = len(train_loader)
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
 
     end = time.time()
-    for idx, (images, labels) in enumerate(train_loader):
+    for idx, (images, labels) in zip(range(batch_num), train_loader):
         data_time.update(time.time() - end)
 
         images = torch.cat([images[0], images[1]], dim=0)
@@ -200,11 +215,10 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
         # compute loss
         features = model(images)
         f1, f2 = torch.split(features, [bsz, bsz], dim=0)
-        features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-        if opt.method == 'SupCon':
-            loss = criterion(features, labels)
+        if opt.method in ('SupCon', "dSupCon"):
+            loss = criterion(f1, f2, target=labels)
         elif opt.method == 'SimCLR':
-            loss = criterion(features)
+            loss = criterion(f1, f2)
         else:
             raise ValueError('contrastive method not supported: {}'.
                              format(opt.method))
@@ -227,8 +241,8 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
                   'BT {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})'.format(
-                   epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses))
+                epoch, idx + 1, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses))
             sys.stdout.flush()
 
     return losses.avg

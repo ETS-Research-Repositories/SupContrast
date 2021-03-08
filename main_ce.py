@@ -1,20 +1,20 @@
 from __future__ import print_function
 
+import argparse
+import math
 import os
 import sys
-import argparse
 import time
-import math
 
 import tensorboard_logger as tb_logger
 import torch
 import torch.backends.cudnn as cudnn
 from torchvision import transforms, datasets
 
+from networks.resnet_big import SupCEResNet
 from util import AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate, accuracy
 from util import set_optimizer, save_model
-from networks.resnet_big import SupCEResNet
 
 try:
     import apex
@@ -32,7 +32,7 @@ def parse_option():
                         help='save frequency')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='batch_size')
-    parser.add_argument('--num_workers', type=int, default=16,
+    parser.add_argument('--num_workers', type=int, default=12,
                         help='num of workers to use')
     parser.add_argument('--epochs', type=int, default=500,
                         help='number of training epochs')
@@ -63,6 +63,7 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--trial', type=str, default='0',
                         help='id for recording multiple runs')
+    parser.add_argument("--save_dir", type=str, default=None)
 
     opt = parser.parse_args()
 
@@ -76,7 +77,7 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
-    opt.model_name = 'SupCE_{}_{}_lr_{}_decay_{}_bsz_{}_trial_{}'.\
+    opt.model_name = 'SupCE_{}_{}_lr_{}_decay_{}_bsz_{}_trial_{}'. \
         format(opt.dataset, opt.model, opt.learning_rate, opt.weight_decay,
                opt.batch_size, opt.trial)
 
@@ -93,7 +94,7 @@ def parse_option():
         if opt.cosine:
             eta_min = opt.learning_rate * (opt.lr_decay_rate ** 3)
             opt.warmup_to = eta_min + (opt.learning_rate - eta_min) * (
-                    1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
+                1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
         else:
             opt.warmup_to = opt.learning_rate
 
@@ -104,6 +105,12 @@ def parse_option():
     opt.save_folder = os.path.join(opt.model_path, opt.model_name)
     if not os.path.isdir(opt.save_folder):
         os.makedirs(opt.save_folder)
+
+    if opt.save_dir:
+        opt.save_folder = opt.save_dir
+        opt.tb_folder = opt.save_dir
+        if not os.path.exists(opt.save_folder):
+            os.makedirs(opt.save_folder)
 
     if opt.dataset == 'cifar10':
         opt.n_cls = 10
@@ -156,15 +163,17 @@ def set_loader(opt):
     else:
         raise ValueError(opt.dataset)
 
-    train_sampler = None
+    from util import InfiniteSampler
+    train_sampler = InfiniteSampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=opt.batch_size, shuffle=(train_sampler is None),
         num_workers=opt.num_workers, pin_memory=True, sampler=train_sampler)
+
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=256, shuffle=False,
         num_workers=8, pin_memory=True)
 
-    return train_loader, val_loader
+    return iter(train_loader), val_loader
 
 
 def set_model(opt):
@@ -188,14 +197,14 @@ def set_model(opt):
 def train(train_loader, model, criterion, optimizer, epoch, opt):
     """one epoch training"""
     model.train()
-
+    batch_num = len(train_loader)
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
 
     end = time.time()
-    for idx, (images, labels) in enumerate(train_loader):
+    for idx, (images, labels) in zip(range(batch_num), train_loader):
         data_time.update(time.time() - end)
 
         images = images.cuda(non_blocking=True)
@@ -230,8 +239,8 @@ def train(train_loader, model, criterion, optimizer, epoch, opt):
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                   epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, top1=top1))
+                epoch, idx + 1, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses, top1=top1))
             sys.stdout.flush()
 
     return losses.avg, top1.avg
@@ -270,8 +279,8 @@ def validate(val_loader, model, criterion, opt):
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                       idx, len(val_loader), batch_time=batch_time,
-                       loss=losses, top1=top1))
+                    idx, len(val_loader), batch_time=batch_time,
+                    loss=losses, top1=top1))
 
     print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
     return losses.avg, top1.avg

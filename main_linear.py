@@ -1,18 +1,18 @@
 from __future__ import print_function
 
-import sys
 import argparse
-import time
 import math
+import sys
+import time
 
 import torch
 import torch.backends.cudnn as cudnn
 
 from main_ce import set_loader
+from networks.resnet_big import SupConResNet, LinearClassifier
 from util import AverageMeter
 from util import adjust_learning_rate, warmup_learning_rate, accuracy
 from util import set_optimizer
-from networks.resnet_big import SupConResNet, LinearClassifier
 
 try:
     import apex
@@ -71,7 +71,7 @@ def parse_option():
     for it in iterations:
         opt.lr_decay_epochs.append(int(it))
 
-    opt.model_name = '{}_{}_lr_{}_decay_{}_bsz_{}'.\
+    opt.model_name = '{}_{}_lr_{}_decay_{}_bsz_{}'. \
         format(opt.dataset, opt.model, opt.learning_rate, opt.weight_decay,
                opt.batch_size)
 
@@ -86,7 +86,7 @@ def parse_option():
         if opt.cosine:
             eta_min = opt.learning_rate * (opt.lr_decay_rate ** 3)
             opt.warmup_to = eta_min + (opt.learning_rate - eta_min) * (
-                    1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
+                1 + math.cos(math.pi * opt.warm_epochs / opt.epochs)) / 2
         else:
             opt.warmup_to = opt.learning_rate
 
@@ -132,6 +132,7 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
     """one epoch training"""
     model.eval()
     classifier.train()
+    batch_num = len(train_loader)
 
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -139,7 +140,7 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
     top1 = AverageMeter()
 
     end = time.time()
-    for idx, (images, labels) in enumerate(train_loader):
+    for idx, (images, labels) in zip(range(batch_num), train_loader):
         data_time.update(time.time() - end)
 
         images = images.cuda(non_blocking=True)
@@ -176,8 +177,8 @@ def train(train_loader, model, classifier, criterion, optimizer, epoch, opt):
                   'DT {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'loss {loss.val:.3f} ({loss.avg:.3f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                   epoch, idx + 1, len(train_loader), batch_time=batch_time,
-                   data_time=data_time, loss=losses, top1=top1))
+                epoch, idx + 1, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses, top1=top1))
             sys.stdout.flush()
 
     return losses.avg, top1.avg
@@ -217,8 +218,8 @@ def validate(val_loader, model, classifier, criterion, opt):
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
-                       idx, len(val_loader), batch_time=batch_time,
-                       loss=losses, top1=top1))
+                    idx, len(val_loader), batch_time=batch_time,
+                    loss=losses, top1=top1))
 
     print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
     return losses.avg, top1.avg
